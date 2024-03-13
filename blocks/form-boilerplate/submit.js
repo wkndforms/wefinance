@@ -3,17 +3,18 @@ export function submitSuccess(e, form) {
   if (payload?.body?.redirectUrl) {
     window.location.assign(encodeURI(payload.body.redirectUrl));
   } else {
-    let thankYouMessage = form.querySelector('.form-message.success-message');
-    if (!thankYouMessage) {
-      thankYouMessage = document.createElement('div');
-      thankYouMessage.className = 'form-message success-message';
-    }
-    thankYouMessage.innerHTML = payload?.body?.thankYouMessage || 'Thanks for your submission';
-    form.prepend(thankYouMessage);
-    if (thankYouMessage.scrollIntoView) {
-      thankYouMessage.scrollIntoView({ behavior: 'smooth' });
-    }
-    form.reset();
+    // let thankYouMessage = form.querySelector('.form-message.success-message');
+    // if (!thankYouMessage) {
+    //   thankYouMessage = document.createElement('div');
+    //   thankYouMessage.className = 'form-message success-message';
+    // }
+    // thankYouMessage.innerHTML = payload?.body?.thankYouMessage || 'Your submission has been received and noted.';
+    // form.prepend(thankYouMessage);
+    // if (thankYouMessage.scrollIntoView) {
+    //   thankYouMessage.scrollIntoView({ behavior: 'smooth' });
+    // }
+    // form.reset();
+    window.location.href = form.dataset?.redirect || 'thankyou';
   }
   form.setAttribute('data-submitting', 'false');
   form.querySelector('button[type="submit"]').disabled = false;

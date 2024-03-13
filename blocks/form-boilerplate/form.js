@@ -340,7 +340,7 @@ export async function generateFormRendition(panel, container) {
     } else {
       const element = renderField(field);
       if (field.appliedCssClassNames) {
-        element.className += ` ${field.appliedCssClassNames}`;
+        element.className += ` col-${field.appliedCssClassNames}`;
       }
       colSpanDecorator(field, element);
       const decorator = await componentDecorater(field);

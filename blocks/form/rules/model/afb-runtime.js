@@ -18,7 +18,7 @@
 * the terms of the Adobe license agreement accompanying it.
 *************************************************************************/
 
-import { propertyChange, ExecuteRule, Initialize, RemoveItem, FormLoad, FieldChanged, ValidationComplete, Change, Valid, Invalid, SubmitSuccess, CustomEvent, SubmitError, SubmitFailure, Submit, RemoveInstance, AddInstance, Reset, AddItem, Click } from './afb-events.js';
+import { propertyChange, ExecuteRule, Initialize, RemoveItem, Change, FormLoad, FieldChanged, ValidationComplete, Valid, Invalid, SubmitSuccess, CustomEvent, SubmitError, SubmitFailure, Submit, Save, Reset, RemoveInstance, AddInstance, AddItem, Click } from './afb-events.js';
 import Formula from '../formula/index.js';
 import { format, parseDefaultDate, datetimeToNumber, parseDateSkeleton, formatDate, numberToDatetime } from './afb-formatters.min.js';
 
@@ -162,6 +162,9 @@ const isDateField = function (item) {
 const isCaptcha = function (item) {
     const fieldType = item?.fieldType || defaultFieldTypes(item);
     return fieldType === 'captcha';
+};
+const isButton = function (item) {
+    return item?.fieldType === 'button';
 };
 function deepClone(obj, idGenerator) {
     let result;
@@ -589,6 +592,526 @@ const resolveData = (data, input, create) => {
     }
     return result;
 };
+class FileObject {
+    data;
+    mediaType = 'application/octet-stream';
+    name = 'unknown';
+    size = 0;
+    constructor(init) {
+        Object.assign(this, init);
+    }
+    get type() {
+        return this.mediaType;
+    }
+    toJSON() {
+        return {
+            'name': this.name,
+            'size': this.size,
+            'mediaType': this.mediaType,
+            'data': this.data.toString()
+        };
+    }
+    equals(obj) {
+        return (this.data === obj.data &&
+            this.mediaType === obj.mediaType &&
+            this.name === obj.name &&
+            this.size === obj.size);
+    }
+}
+const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'.split('');
+const fileSizeRegex = /^(\d*\.?\d+)(\\?(?=[KMGT])([KMGT])(?:i?B)?|B?)$/i;
+const randomWord = (l) => {
+    const ret = [];
+    for (let i = 0; i <= l; i++) {
+        let randIndex;
+        if (i === 0) {
+            randIndex = Math.floor(Math.random() * (chars.length - 11));
+        }
+        else {
+            randIndex = Math.floor(Math.random() * (chars.length));
+        }
+        ret.push(chars[randIndex]);
+    }
+    return ret.join('');
+};
+const getAttachments = (input, excludeUnbound = false) => {
+    const items = input.items || [];
+    return items?.reduce((acc, item) => {
+        if (excludeUnbound && item.dataRef === null) {
+            return acc;
+        }
+        let ret = null;
+        if (item.isContainer) {
+            ret = getAttachments(item, excludeUnbound);
+        }
+        else {
+            if (isFile(item.getState())) {
+                ret = {};
+                const name = item.name || '';
+                const dataRef = (item.dataRef != null)
+                    ? item.dataRef
+                    : (name.length > 0 ? item.name : undefined);
+                if (item.value instanceof Array) {
+                    ret[item.id] = item.value.map((x) => {
+                        return { ...x, 'dataRef': dataRef };
+                    });
+                }
+                else if (item.value != null) {
+                    ret[item.id] = { ...item.value, 'dataRef': dataRef };
+                }
+            }
+        }
+        return Object.assign(acc, ret);
+    }, {});
+};
+const getFileSizeInBytes = (str) => {
+    let retVal = 0;
+    if (typeof str === 'string') {
+        const matches = fileSizeRegex.exec(str.trim());
+        if (matches != null) {
+            retVal = sizeToBytes(parseFloat(matches[1]), (matches[2] || 'kb').toUpperCase());
+        }
+    }
+    return retVal;
+};
+const sizeToBytes = (size, symbol) => {
+    const sizes = { 'KB': 1, 'MB': 2, 'GB': 3, 'TB': 4 };
+    const i = Math.pow(1024, sizes[symbol]);
+    return Math.round(size * i);
+};
+const IdGenerator = function* (initial = 50) {
+    const initialize = function () {
+        const arr = [];
+        for (let i = 0; i < initial; i++) {
+            arr.push(randomWord(10));
+        }
+        return arr;
+    };
+    const passedIds = {};
+    let ids = initialize();
+    do {
+        let x = ids.pop();
+        while (x in passedIds) {
+            if (ids.length === 0) {
+                ids = initialize();
+            }
+            x = ids.pop();
+        }
+        passedIds[x] = true;
+        yield ids.pop();
+        if (ids.length === 0) {
+            ids = initialize();
+        }
+    } while (ids.length > 0);
+};
+const isDataUrl = (str) => {
+    const dataUrlRegex = /^data:([a-z]+\/[a-z0-9-+.]+)?;(?:name=(.*);)?base64,(.*)$/;
+    return dataUrlRegex.exec(str.trim()) != null;
+};
+const extractFileInfo = (file) => {
+    if (file !== null) {
+        let retVal = null;
+        if (file instanceof FileObject) {
+            retVal = file;
+        }
+        else if (typeof File !== 'undefined' && file instanceof File) {
+            retVal = {
+                name: file.name,
+                mediaType: file.type,
+                size: file.size,
+                data: file
+            };
+        }
+        else if (typeof file === 'string' && isDataUrl(file)) {
+            const result = dataURItoBlob(file);
+            if (result !== null) {
+                const { blob, name } = result;
+                retVal = {
+                    name: name,
+                    mediaType: blob.type,
+                    size: blob.size,
+                    data: blob
+                };
+            }
+        }
+        else {
+            let jFile = file;
+            try {
+                jFile = JSON.parse(file);
+                retVal = jFile;
+                if (!retVal.mediaType) {
+                    retVal.mediaType = retVal.type;
+                }
+            }
+            catch (ex) {
+            }
+            if (typeof jFile?.data === 'string' && isDataUrl(jFile?.data)) {
+                const result = dataURItoBlob(jFile?.data);
+                if (result !== null) {
+                    const blob = result.blob;
+                    retVal = {
+                        name: jFile?.name,
+                        mediaType: jFile?.type || jFile?.mediaType,
+                        size: blob.size,
+                        data: blob
+                    };
+                }
+            }
+            else if (typeof jFile === 'string') {
+                const fileName = jFile.split('/').pop();
+                retVal = {
+                    name: fileName,
+                    mediaType: 'application/octet-stream',
+                    size: 0,
+                    data: jFile
+                };
+            }
+            else if (typeof jFile === 'object') {
+                retVal = {
+                    name: jFile?.name,
+                    mediaType: jFile?.type || jFile?.mediaType,
+                    size: jFile?.size,
+                    data: jFile?.data
+                };
+            }
+        }
+        if (retVal !== null && retVal.data != null) {
+            return new FileObject(retVal);
+        }
+        return null;
+    }
+    else {
+        return null;
+    }
+};
+const dataURItoBlob = (dataURI) => {
+    const regex = /^data:([a-z]+\/[a-z0-9-+.]+)?(?:;name=([^;]+))?(;base64)?,(.+)$/;
+    const groups = regex.exec(dataURI);
+    if (groups !== null) {
+        const type = groups[1] || '';
+        const name = groups[2] || 'unknown';
+        const isBase64 = typeof groups[3] === 'string';
+        if (isBase64) {
+            const binary = atob(groups[4]);
+            const array = [];
+            for (let i = 0; i < binary.length; i++) {
+                array.push(binary.charCodeAt(i));
+            }
+            const blob = new window.Blob([new Uint8Array(array)], { type });
+            return { name, blob };
+        }
+        else {
+            const blob = new window.Blob([groups[4]], { type });
+            return { name, blob };
+        }
+    }
+    else {
+        return null;
+    }
+};
+const isFormOrSiteContainer = (model) => {
+    return (':items' in model || 'cqItems' in model) && (':itemsOrder' in model || 'cqItemsOrder' in model);
+};
+const sitesModelToFormModel = (sitesModel) => {
+    if (!sitesModel || !Object.keys(sitesModel).length) {
+        return sitesModel;
+    }
+    if (isFormOrSiteContainer(sitesModel)) {
+        const itemsArr = [];
+        const itemsOrder = sitesModel[':itemsOrder'] || sitesModel.cqItemsOrder;
+        const items = sitesModel[':items'] || sitesModel.cqItems;
+        itemsOrder.forEach((elemName) => {
+            itemsArr.push(sitesModelToFormModel(items[elemName]));
+        });
+        sitesModel.items = itemsArr;
+    }
+    return sitesModel;
+};
+const replaceTemplatePlaceholders = (str, values = []) => {
+    return str?.replace(/\${(\d+)}/g, (match, index) => {
+        const replacement = values[index];
+        return typeof replacement !== 'undefined' ? replacement : match;
+    });
+};
+const dateRegex = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+const emailRegex = /^[a-zA-Z0-9.!#$%&’*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$/;
+const days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const daysInMonth = (leapYear, month) => {
+    if (leapYear && month == 2) {
+        return 29;
+    }
+    return days[month - 1];
+};
+const isLeapYear = (year) => {
+    return year % 400 === 0 || year % 4 === 0 && year % 100 !== 0;
+};
+const coerceType = (param, type) => {
+    let num;
+    switch (type) {
+        case 'string':
+            return param + '';
+        case 'number':
+            num = +param;
+            if (!isNaN(num)) {
+                return num;
+            }
+            break;
+        case 'boolean':
+            if (typeof param === 'string') {
+                return param === 'true';
+            }
+            else if (typeof param === 'number') {
+                return param !== 0;
+            }
+    }
+    throw `${param} has invalid type. Expected : ${type}, Actual ${typeof param}`;
+};
+const checkNumber = (inputVal) => {
+    if (inputVal === '' || inputVal == null) {
+        return {
+            value: '', valid: true
+        };
+    }
+    let value = parseFloat(inputVal);
+    const valid = !isNaN(value);
+    if (!valid) {
+        value = inputVal;
+    }
+    return {
+        value, valid
+    };
+};
+const checkInteger = (inputVal) => {
+    if (inputVal === '' || inputVal == null) {
+        return {
+            value: '', valid: true
+        };
+    }
+    let value = parseFloat(inputVal);
+    const valid = !isNaN(value) && Math.round(value) === value;
+    if (!valid) {
+        value = inputVal;
+    }
+    return {
+        value, valid
+    };
+};
+const toArray = (inputVal) => {
+    if (inputVal != null && !(inputVal instanceof Array)) {
+        return [inputVal];
+    }
+    return inputVal;
+};
+const checkBool = (inputVal) => {
+    const valid = typeof inputVal === 'boolean' || inputVal === 'true' || inputVal === 'false';
+    const value = typeof inputVal === 'boolean' ? inputVal : (valid ? inputVal === 'true' : inputVal);
+    return { valid, value };
+};
+const checkFile = (inputVal) => {
+    const value = extractFileInfo(inputVal);
+    const valid = value !== null;
+    return {
+        value: valid ? value : inputVal,
+        valid
+    };
+};
+const matchMediaType = (mediaType, accepts) => {
+    return !mediaType || accepts.some((accept) => {
+        const trimmedAccept = accept.trim();
+        const prefixAccept = trimmedAccept.split('/')[0];
+        const suffixAccept = trimmedAccept.split('.')[1];
+        return ((trimmedAccept.includes('*') && mediaType.startsWith(prefixAccept)) ||
+            (trimmedAccept.includes('.') && mediaType.endsWith(suffixAccept)) ||
+            (trimmedAccept === mediaType));
+    });
+};
+const partitionArray = (inputVal, validatorFn) => {
+    const value = toArray(inputVal);
+    if (value == null) {
+        return [[], [value]];
+    }
+    return value.reduce((acc, x) => {
+        if (acc[1].length == 0) {
+            const r = validatorFn(x);
+            const index = r.valid ? 0 : 1;
+            acc[index].push(r.value);
+        }
+        return acc;
+    }, [[], []]);
+};
+const ValidConstraints = {
+    date: ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'format'],
+    string: ['minLength', 'maxLength', 'pattern'],
+    number: ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum'],
+    array: ['minItems', 'maxItems', 'uniqueItems'],
+    file: ['accept', 'maxFileSize'],
+    email: ['minLength', 'maxLength', 'format', 'pattern']
+};
+const validationConstraintsList = ['type', 'format', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems',
+    'maxItems', 'uniqueItems', 'minLength', 'maxLength', 'pattern', 'required', 'enum', 'accept', 'maxFileSize'];
+const Constraints = {
+    type: (constraint, inputVal) => {
+        let value = inputVal;
+        if (inputVal == undefined) {
+            return {
+                valid: true,
+                value: inputVal
+            };
+        }
+        let valid = true, res;
+        switch (constraint) {
+            case 'string':
+                valid = true;
+                value = inputVal.toString();
+                break;
+            case 'string[]':
+                value = toArray(inputVal);
+                break;
+            case 'number':
+                res = checkNumber(inputVal);
+                value = res.value;
+                valid = res.valid;
+                break;
+            case 'boolean':
+                res = checkBool(inputVal);
+                valid = res.valid;
+                value = res.value;
+                break;
+            case 'integer':
+                res = checkInteger(inputVal);
+                valid = res.valid;
+                value = res.value;
+                break;
+            case 'integer[]':
+                res = partitionArray(inputVal, checkInteger);
+                valid = res[1].length === 0;
+                value = valid ? res[0] : inputVal;
+                break;
+            case 'file':
+                res = checkFile(inputVal instanceof Array ? inputVal[0] : inputVal);
+                valid = res.valid;
+                value = res.value;
+                break;
+            case 'file[]':
+                res = partitionArray(inputVal, checkFile);
+                valid = res[1].length === 0;
+                value = valid ? res[0] : inputVal;
+                break;
+            case 'number[]':
+                res = partitionArray(inputVal, checkNumber);
+                valid = res[1].length === 0;
+                value = valid ? res[0] : inputVal;
+                break;
+            case 'boolean[]':
+                res = partitionArray(inputVal, checkBool);
+                valid = res[1].length === 0;
+                value = valid ? res[0] : inputVal;
+                break;
+        }
+        return {
+            valid,
+            value
+        };
+    },
+    format: (constraint, input) => {
+        let valid = true;
+        const value = input;
+        if (input === null) {
+            return { value, valid };
+        }
+        let res;
+        switch (constraint) {
+            case 'date':
+                res = dateRegex.exec((input || '').trim());
+                if (res != null) {
+                    const [match, year, month, date] = res;
+                    const [nMonth, nDate] = [+month, +date];
+                    const leapYear = isLeapYear(+year);
+                    valid = (nMonth >= 1 && nMonth <= 12) &&
+                        (nDate >= 1 && nDate <= daysInMonth(leapYear, nMonth));
+                }
+                else {
+                    valid = false;
+                }
+                break;
+            case 'email':
+                valid = new RegExp(emailRegex).test((input || '').trim());
+                break;
+            case 'data-url':
+                valid = true;
+                break;
+        }
+        return { valid, value };
+    },
+    minimum: (constraint, value) => {
+        return { valid: value >= constraint, value };
+    },
+    maximum: (constraint, value) => {
+        return { valid: value <= constraint, value };
+    },
+    exclusiveMinimum: (constraint, value) => {
+        return { valid: value > constraint, value };
+    },
+    exclusiveMaximum: (constraint, value) => {
+        return { valid: value < constraint, value };
+    },
+    minItems: (constraint, value) => {
+        return { valid: (value instanceof Array) && value.length >= constraint, value };
+    },
+    maxItems: (constraint, value) => {
+        return { valid: (value instanceof Array) && value.length <= constraint, value };
+    },
+    uniqueItems: (constraint, value) => {
+        return { valid: !constraint || ((value instanceof Array) && value.length === new Set(value).size), value };
+    },
+    minLength: (constraint, value) => {
+        return { ...Constraints.minimum(constraint, typeof value === 'string' ? value.length : 0), value };
+    },
+    maxLength: (constraint, value) => {
+        return { ...Constraints.maximum(constraint, typeof value === 'string' ? value.length : 0), value };
+    },
+    pattern: (constraint, value) => {
+        let regex;
+        if (typeof constraint === 'string') {
+            regex = new RegExp(constraint);
+        }
+        else {
+            regex = constraint;
+        }
+        return { valid: regex.test(value), value };
+    },
+    required: (constraint, value) => {
+        const valid = constraint ? value != null && value !== '' : true;
+        return { valid, value };
+    },
+    enum: (constraint, value) => {
+        return {
+            valid: constraint.indexOf(value) > -1,
+            value
+        };
+    },
+    accept: (constraint, value) => {
+        if (!constraint || constraint.length === 0 || value === null || value === undefined) {
+            return {
+                valid: true,
+                value
+            };
+        }
+        const tempValue = value instanceof Array ? value : [value];
+        const invalidFile = tempValue.some((file) => !matchMediaType(file.type, constraint));
+        return {
+            valid: !invalidFile,
+            value
+        };
+    },
+    maxFileSize: (constraint, value) => {
+        const sizeLimit = typeof constraint === 'string' ? getFileSizeInBytes(constraint) : constraint;
+        return {
+            valid: !(value instanceof FileObject) || value.size <= sizeLimit,
+            value
+        };
+    }
+};
 const editableProperties = [
     'value',
     'label',
@@ -607,7 +1130,8 @@ const editableProperties = [
     'maximum',
     'maxItems',
     'minimum',
-    'minItems'
+    'minItems',
+    'checked'
 ];
 const dynamicProps = [
     ...editableProperties,
@@ -618,9 +1142,17 @@ const staticFields = ['plain-text', 'image'];
 class ActionImplWithTarget {
     _action;
     _target;
+    _currentTarget;
     constructor(_action, _target) {
         this._action = _action;
-        this._target = _target;
+        if (_action.target) {
+            this._currentTarget = _target;
+            this._target = _action.target;
+        }
+        else {
+            this._target = _target;
+            this._currentTarget = _target;
+        }
     }
     get type() {
         return this._action.type;
@@ -633,6 +1165,9 @@ class ActionImplWithTarget {
     }
     get target() {
         return this._target;
+    }
+    get currentTarget() {
+        return this._currentTarget;
     }
     get isCustomEvent() {
         return this._action.isCustomEvent;
@@ -818,8 +1353,11 @@ class BaseNode {
         return this._jsonModel.uniqueItems;
     }
     isTransparent() {
-        const isNonTransparent = this.parent?._jsonModel.type === 'array';
+        const isNonTransparent = this.parent?._jsonModel?.type === 'array';
         return !this._jsonModel.name && !isNonTransparent;
+    }
+    getDependents() {
+        return this._dependents.map(x => x.node.id);
     }
     getState(forRestore = false) {
         return {
@@ -835,7 +1373,7 @@ class BaseNode {
             } : {}),
             ':type': this[':type'],
             ...(forRestore ? {
-                _dependents: this._dependents.length ? this._dependents.map(x => x.node.id) : undefined,
+                _dependents: this._dependents.length ? this.getDependents() : undefined,
                 allowedComponents: undefined,
                 columnClassNames: undefined,
                 columnCount: undefined,
@@ -861,7 +1399,12 @@ class BaseNode {
                     return propsToLook.indexOf(x.propertyName) > -1;
                 }) > -1;
                 if (isPropChanged) {
-                    dependent.dispatch(new ExecuteRule());
+                    if (this.form.changeEventBehaviour === 'deps') {
+                        dependent.dispatch(change);
+                    }
+                    else {
+                        dependent.dispatch(new ExecuteRule());
+                    }
                 }
             });
             this._dependents.push({ node: dependent, subscription });
@@ -918,12 +1461,15 @@ class BaseNode {
                 this.notifyDependents(changeAction);
             }
             notifyChildren.call(this, changeAction);
+            if (validationConstraintsList.includes(prop)) {
+                this.validate();
+            }
             return changeAction.payload.changes;
         }
         return [];
     }
     _bindToDataModel(contextualDataModel) {
-        if (this.id === '$form') {
+        if (this.fieldType === 'form' || this.id === '$form') {
             this._data = contextualDataModel;
             return;
         }
@@ -1134,16 +1680,23 @@ class Scriptable extends BaseNode {
         return this._events[eName] || [];
     }
     applyUpdates(updates) {
-        Object.entries(updates).forEach(([key, value]) => {
-            if (key in editableProperties || (key in this && typeof this[key] !== 'function')) {
-                try {
-                    this[key] = value;
-                }
-                catch (e) {
-                    console.error(e);
-                }
+        if (typeof updates === 'object') {
+            if (updates !== null) {
+                Object.entries(updates).forEach(([key, value]) => {
+                    if (key in editableProperties || (key in this && typeof this[key] !== 'function')) {
+                        try {
+                            this[key] = value;
+                        }
+                        catch (e) {
+                            console.error(e);
+                        }
+                    }
+                });
             }
-        });
+        }
+        else if (typeof updates !== 'undefined') {
+            this.value = updates;
+        }
     }
     executeAllRules(context) {
         const entries = Object.entries(this.getRules());
@@ -1231,6 +1784,11 @@ class Scriptable extends BaseNode {
         const node = this.ruleEngine.compileRule(expr, this.lang);
         return this.ruleEngine.execute(node, this.getExpressionScope(), ruleContext);
     }
+    change(event, context) {
+        if (this.form.changeEventBehaviour === 'deps') {
+            this.executeAllRules(context);
+        }
+    }
     executeAction(action) {
         const context = {
             'form': this.form,
@@ -1250,7 +1808,9 @@ class Scriptable extends BaseNode {
             this[funcName](action, context);
         }
         node.forEach((n) => this.executeEvent(context, n));
-        this.notifyDependents(action);
+        if (action.target === this) {
+            this.notifyDependents(action);
+        }
     }
 }
 const notifyChildrenAttributes = [
@@ -1730,9 +2290,14 @@ class FormMetaData extends Node {
 class SubmitMetaData {
     lang;
     captchaInfo;
-    constructor(lang = '', captchaInfo) {
-        this.lang = lang;
-        this.captchaInfo = captchaInfo;
+    constructor(options = {}) {
+        this.lang = options.lang || 'en';
+        this.captchaInfo = options.captchaInfo || {};
+        Object.keys(options).forEach(key => {
+            if (key !== 'lang' && key !== 'captchaInfo') {
+                this[key] = options[key];
+            }
+        });
     }
 }
 const levels = {
@@ -1852,247 +2417,6 @@ class EventQueue {
         this._isProcessing = false;
     }
 }
-class FileObject {
-    data;
-    mediaType = 'application/octet-stream';
-    name = 'unknown';
-    size = 0;
-    constructor(init) {
-        Object.assign(this, init);
-    }
-    get type() {
-        return this.mediaType;
-    }
-    toJSON() {
-        return {
-            'name': this.name,
-            'size': this.size,
-            'mediaType': this.mediaType,
-            'data': this.data.toString()
-        };
-    }
-    equals(obj) {
-        return (this.data === obj.data &&
-            this.mediaType === obj.mediaType &&
-            this.name === obj.name &&
-            this.size === obj.size);
-    }
-}
-const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'.split('');
-const fileSizeRegex = /^(\d*\.?\d+)(\\?(?=[KMGT])([KMGT])(?:i?B)?|B?)$/i;
-const randomWord = (l) => {
-    const ret = [];
-    for (let i = 0; i <= l; i++) {
-        let randIndex;
-        if (i === 0) {
-            randIndex = Math.floor(Math.random() * (chars.length - 11));
-        }
-        else {
-            randIndex = Math.floor(Math.random() * (chars.length));
-        }
-        ret.push(chars[randIndex]);
-    }
-    return ret.join('');
-};
-const getAttachments = (input, excludeUnbound = false) => {
-    const items = input.items || [];
-    return items?.reduce((acc, item) => {
-        if (excludeUnbound && item.dataRef === null) {
-            return acc;
-        }
-        let ret = null;
-        if (item.isContainer) {
-            ret = getAttachments(item, excludeUnbound);
-        }
-        else {
-            if (isFile(item.getState())) {
-                ret = {};
-                const name = item.name || '';
-                const dataRef = (item.dataRef != null)
-                    ? item.dataRef
-                    : (name.length > 0 ? item.name : undefined);
-                if (item.value instanceof Array) {
-                    ret[item.id] = item.value.map((x) => {
-                        return { ...x, 'dataRef': dataRef };
-                    });
-                }
-                else if (item.value != null) {
-                    ret[item.id] = { ...item.value, 'dataRef': dataRef };
-                }
-            }
-        }
-        return Object.assign(acc, ret);
-    }, {});
-};
-const getFileSizeInBytes = (str) => {
-    let retVal = 0;
-    if (typeof str === 'string') {
-        const matches = fileSizeRegex.exec(str.trim());
-        if (matches != null) {
-            retVal = sizeToBytes(parseFloat(matches[1]), (matches[2] || 'kb').toUpperCase());
-        }
-    }
-    return retVal;
-};
-const sizeToBytes = (size, symbol) => {
-    const sizes = { 'KB': 1, 'MB': 2, 'GB': 3, 'TB': 4 };
-    const i = Math.pow(1024, sizes[symbol]);
-    return Math.round(size * i);
-};
-const IdGenerator = function* (initial = 50) {
-    const initialize = function () {
-        const arr = [];
-        for (let i = 0; i < initial; i++) {
-            arr.push(randomWord(10));
-        }
-        return arr;
-    };
-    const passedIds = {};
-    let ids = initialize();
-    do {
-        let x = ids.pop();
-        while (x in passedIds) {
-            if (ids.length === 0) {
-                ids = initialize();
-            }
-            x = ids.pop();
-        }
-        passedIds[x] = true;
-        yield ids.pop();
-        if (ids.length === 0) {
-            ids = initialize();
-        }
-    } while (ids.length > 0);
-};
-const isDataUrl = (str) => {
-    const dataUrlRegex = /^data:([a-z]+\/[a-z0-9-+.]+)?;(?:name=(.*);)?base64,(.*)$/;
-    return dataUrlRegex.exec(str.trim()) != null;
-};
-const extractFileInfo = (file) => {
-    if (file !== null) {
-        let retVal = null;
-        if (file instanceof FileObject) {
-            retVal = file;
-        }
-        else if (typeof File !== 'undefined' && file instanceof File) {
-            retVal = {
-                name: file.name,
-                mediaType: file.type,
-                size: file.size,
-                data: file
-            };
-        }
-        else if (typeof file === 'string' && isDataUrl(file)) {
-            const result = dataURItoBlob(file);
-            if (result !== null) {
-                const { blob, name } = result;
-                retVal = {
-                    name: name,
-                    mediaType: blob.type,
-                    size: blob.size,
-                    data: blob
-                };
-            }
-        }
-        else {
-            let jFile = file;
-            try {
-                jFile = JSON.parse(file);
-                retVal = jFile;
-                if (!retVal.mediaType) {
-                    retVal.mediaType = retVal.type;
-                }
-            }
-            catch (ex) {
-            }
-            if (typeof jFile?.data === 'string' && isDataUrl(jFile?.data)) {
-                const result = dataURItoBlob(jFile?.data);
-                if (result !== null) {
-                    const blob = result.blob;
-                    retVal = {
-                        name: jFile?.name,
-                        mediaType: jFile?.type || jFile?.mediaType,
-                        size: blob.size,
-                        data: blob
-                    };
-                }
-            }
-            else if (typeof jFile === 'string') {
-                const fileName = jFile.split('/').pop();
-                retVal = {
-                    name: fileName,
-                    mediaType: 'application/octet-stream',
-                    size: 0,
-                    data: jFile
-                };
-            }
-            else if (typeof jFile === 'object') {
-                retVal = {
-                    name: jFile?.name,
-                    mediaType: jFile?.type || jFile?.mediaType,
-                    size: jFile?.size,
-                    data: jFile?.data
-                };
-            }
-        }
-        if (retVal !== null && retVal.data != null) {
-            return new FileObject(retVal);
-        }
-        return null;
-    }
-    else {
-        return null;
-    }
-};
-const dataURItoBlob = (dataURI) => {
-    const regex = /^data:([a-z]+\/[a-z0-9-+.]+)?(?:;name=([^;]+))?(;base64)?,(.+)$/;
-    const groups = regex.exec(dataURI);
-    if (groups !== null) {
-        const type = groups[1] || '';
-        const name = groups[2] || 'unknown';
-        const isBase64 = typeof groups[3] === 'string';
-        if (isBase64) {
-            const binary = atob(groups[4]);
-            const array = [];
-            for (let i = 0; i < binary.length; i++) {
-                array.push(binary.charCodeAt(i));
-            }
-            const blob = new window.Blob([new Uint8Array(array)], { type });
-            return { name, blob };
-        }
-        else {
-            const blob = new window.Blob([groups[4]], { type });
-            return { name, blob };
-        }
-    }
-    else {
-        return null;
-    }
-};
-const isFormOrSiteContainer = (model) => {
-    return (':items' in model || 'cqItems' in model) && (':itemsOrder' in model || 'cqItemsOrder' in model);
-};
-const sitesModelToFormModel = (sitesModel) => {
-    if (!sitesModel || !Object.keys(sitesModel).length) {
-        return sitesModel;
-    }
-    if (isFormOrSiteContainer(sitesModel)) {
-        const itemsArr = [];
-        const itemsOrder = sitesModel[':itemsOrder'] || sitesModel.cqItemsOrder;
-        const items = sitesModel[':items'] || sitesModel.cqItems;
-        itemsOrder.forEach((elemName) => {
-            itemsArr.push(sitesModelToFormModel(items[elemName]));
-        });
-        sitesModel.items = itemsArr;
-    }
-    return sitesModel;
-};
-const replaceTemplatePlaceholders = (str, values = []) => {
-    return str?.replace(/\${(\d+)}/g, (match, index) => {
-        const replacement = values[index];
-        return typeof replacement !== 'undefined' ? replacement : match;
-    });
-};
 const request$1 = (url, data = null, options = {}) => {
     const opts = { ...defaultRequestOptions, ...options };
     const updatedUrl = opts.method === 'GET' && data ? convertQueryString(url, data) : url;
@@ -2260,15 +2584,15 @@ const multipartFormData = (data, attachments) => {
     }
     return formData;
 };
-const submit = async (context, success, error, submitAs = 'multipart/form-data', input_data = null) => {
-    const endpoint = context.form.action;
+const submit = async (context, success, error, submitAs = 'multipart/form-data', input_data = null, action = '', metadata = null) => {
+    const endpoint = action || context.form.action;
     let data = input_data;
     if (typeof data != 'object' || data == null) {
         data = context.form.exportData();
     }
     const attachments = getAttachments(context.form, true);
     let submitContentType = submitAs;
-    const submitDataAndMetaData = { 'data': data, 'submitMetadata': context.form.exportSubmitMetaData() };
+    const submitDataAndMetaData = { 'data': data, ...metadata };
     let formData = submitDataAndMetaData;
     if (Object.keys(attachments).length > 0 || submitAs === 'multipart/form-data') {
         formData = multipartFormData(submitDataAndMetaData, attachments);
@@ -2284,6 +2608,8 @@ const createAction = (name, payload = {}) => {
             return new Change(payload);
         case 'submit':
             return new Submit(payload);
+        case 'save':
+            return new Save(payload);
         case 'click':
             return new Click(payload);
         case 'addItem':
@@ -2331,14 +2657,47 @@ class FunctionRuntimeImpl {
                                     const eventName = 'reset';
                                     target = target || 'reset';
                                     const args = [target, eventName];
+                                    interpreter.globals.form.logger.warn('This usage of reset is deprecated. Please see the documentation and update.');
                                     return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, data, interpreter);
                                 },
                                 validate: (target) => {
                                     const args = [target];
                                     return FunctionRuntimeImpl.getInstance().getFunctions().validate._func.call(undefined, args, data, interpreter);
                                 },
+                                importData: (inputData) => {
+                                    const args = [inputData];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().importData._func.call(undefined, args, data, interpreter);
+                                },
                                 exportData: () => {
                                     return FunctionRuntimeImpl.getInstance().getFunctions().exportData._func.call(undefined, args, data, interpreter);
+                                },
+                                submitForm: (payload, validateForm, contentType) => {
+                                    const submitAs = contentType || 'multipart/form-data';
+                                    const args = [payload, validateForm, submitAs];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().submitForm._func.call(undefined, args, data, interpreter);
+                                },
+                                markFieldAsInvalid: (fieldIdentifier, validationMessage, option) => {
+                                    if (!option || option.useId) {
+                                        interpreter.globals.form.getElement(fieldIdentifier)?.markAsInvalid(validationMessage);
+                                    }
+                                    else if (option && option.useDataRef) {
+                                        interpreter.globals.form.visit(function callback(f) {
+                                            if (f.dataRef === fieldIdentifier) {
+                                                f.markAsInvalid(validationMessage);
+                                            }
+                                        });
+                                    }
+                                    else if (option && option.useQualifiedName) {
+                                        interpreter.globals.form.resolveQualifiedName(fieldIdentifier)?.markAsInvalid(validationMessage);
+                                    }
+                                },
+                                setFocus: (target, flag) => {
+                                    const args = [target, flag];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().setFocus._func.call(undefined, args, data, interpreter);
+                                },
+                                dispatchEvent: (target, eventName, payload) => {
+                                    const args = [target, eventName, payload];
+                                    return FunctionRuntimeImpl.getInstance().getFunctions().dispatchEvent._func.call(undefined, args, data, interpreter);
                                 }
                             }
                         };
@@ -2395,7 +2754,7 @@ class FunctionRuntimeImpl {
                         validation = interpreter.globals.form.getElement(element.$id).validate();
                     }
                     if (Array.isArray(validation) && validation.length) {
-                        interpreter.globals.form.logger.error('Form Validation Error');
+                        interpreter.globals.form.logger.warn('Form Validation Error');
                     }
                     return validation;
                 },
@@ -2440,17 +2799,42 @@ class FunctionRuntimeImpl {
             },
             submitForm: {
                 _func: (args, data, interpreter) => {
-                    const success = toString(args[0]);
-                    const error = toString(args[1]);
-                    const submit_as = args.length > 2 ? toString(args[2]) : 'multipart/form-data';
-                    const submit_data = args.length > 3 ? valueOf(args[3]) : null;
-                    const validate_form = args.length > 4 ? valueOf(args[4]) : true;
+                    let success = null;
+                    let error = null;
+                    let submit_data;
+                    let validate_form;
+                    let submit_as;
+                    if (args.length > 0 && typeof valueOf(args[0]) === 'object') {
+                        submit_data = args.length > 0 ? valueOf(args[0]) : null;
+                        validate_form = args.length > 1 ? valueOf(args[1]) : true;
+                        submit_as = args.length > 2 ? toString(args[2]) : 'multipart/form-data';
+                    }
+                    else {
+                        interpreter.globals.form.logger.warn('This usage of submitForm is deprecated. Please see the documentation and update');
+                        success = toString(args[0]);
+                        error = toString(args[1]);
+                        submit_as = args.length > 2 ? toString(args[2]) : 'multipart/form-data';
+                        submit_data = args.length > 3 ? valueOf(args[3]) : null;
+                        validate_form = args.length > 4 ? valueOf(args[4]) : true;
+                    }
                     interpreter.globals.form.dispatch(new Submit({
                         success,
                         error,
                         submit_as,
                         validate_form: validate_form,
                         data: submit_data
+                    }));
+                    return {};
+                },
+                _signature: []
+            },
+            saveForm: {
+                _func: (args, data, interpreter) => {
+                    const action = toString(args[0]);
+                    const validate_form = args[2] || false;
+                    interpreter.globals.form.dispatch(new Save({
+                        action,
+                        validate_form
                     }));
                     return {};
                 },
@@ -2542,9 +2926,55 @@ class FunctionRuntimeImpl {
     }
 }
 const FunctionRuntime = FunctionRuntimeImpl.getInstance();
+class Version {
+    #minor;
+    #major;
+    #subVersion;
+    #invalid = true;
+    constructor(n) {
+        const match = n.match(/([^.]+)\.([^.]+)(?:\.(.+))?/);
+        if (match) {
+            this.#major = +match[1];
+            this.#minor = +match[2];
+            this.#subVersion = match[3] ? +match[3] : 0;
+            if (isNaN(this.#major) || isNaN(this.#minor) || isNaN(this.#subVersion)) {
+                throw new Error('Invalid version string ' + n);
+            }
+        }
+        else {
+            throw new Error('Invalid version string ' + n);
+        }
+    }
+    get major() {
+        return this.#major;
+    }
+    get minor() {
+        return this.#minor;
+    }
+    get subversion() {
+        return this.#subVersion;
+    }
+    completeMatch(v) {
+        return this.major === v.major &&
+            this.minor === v.minor &&
+            this.#subVersion === v.subversion;
+    }
+    lessThan(v) {
+        return this.major < v.major || (this.major === v.major && (this.minor < v.minor)) || (this.major === v.major && this.minor === v.minor && this.#subVersion < v.subversion);
+    }
+    toString() {
+        return `${this.major}.${this.minor}.${this.subversion}`;
+    }
+    valueOf() {
+        return this.toString();
+    }
+}
+const currentVersion = new Version('0.13');
+const changeEventVersion = new Version('0.13');
 class Form extends Container {
     _ruleEngine;
     _eventQueue;
+    additionalSubmitMetadata = {};
     _fields = {};
     _ids;
     _invalidFields = [];
@@ -2553,9 +2983,15 @@ class Form extends Container {
         this._ruleEngine = _ruleEngine;
         this._eventQueue = _eventQueue;
         this._logger = new Logger(logLevel);
+        this._applyDefaultsInModel();
         if (mode === 'create') {
             this.queueEvent(new Initialize());
-            this.queueEvent(new ExecuteRule());
+            if (this.changeEventBehaviour === 'deps') {
+                this.queueEvent(new Change({ changes: [] }));
+            }
+            else {
+                this.queueEvent(new ExecuteRule());
+            }
         }
         this._ids = IdGenerator();
         this._bindToDataModel(new DataGroup('$form', {}));
@@ -2564,9 +3000,30 @@ class Form extends Container {
             this.queueEvent(new FormLoad());
         }
     }
+    _applyDefaultsInModel() {
+        const current = this.specVersion;
+        this._jsonModel.properties = this._jsonModel.properties || {};
+        this._jsonModel.fieldType = this._jsonModel.fieldType || 'form';
+        if (current.lessThan(changeEventVersion) ||
+            typeof this._jsonModel.properties['fd:changeEventBehaviour'] !== 'string') {
+            this._jsonModel.properties['fd:changeEventBehaviour'] = 'self';
+        }
+    }
     _logger;
+    get activeField() {
+        return this._findActiveField(this);
+    }
+    _findActiveField(field) {
+        if (!field?.isContainer) {
+            return field;
+        }
+        return this._findActiveField(field?.activeChild);
+    }
     get logger() {
         return this._logger;
+    }
+    get changeEventBehaviour() {
+        return this.properties['fd:changeEventBehaviour'] === 'deps' ? 'deps' : 'self';
     }
     dataRefRegex = /("[^"]+?"|[^.]+?)(?:\.|$)/g;
     get metaData() {
@@ -2584,6 +3041,24 @@ class Form extends Container {
     exportData() {
         return this.getDataNode()?.$value;
     }
+    setAdditionalSubmitMetadata(metadata) {
+        this.additionalSubmitMetadata = { ...this.additionalSubmitMetadata, ...metadata };
+    }
+    get specVersion() {
+        if (typeof this._jsonModel.adaptiveform === 'string') {
+            try {
+                return new Version(this._jsonModel.adaptiveform);
+            }
+            catch (e) {
+                console.log(e);
+                console.log('Falling back to default version' + currentVersion.toString());
+                return currentVersion;
+            }
+        }
+        else {
+            return currentVersion;
+        }
+    }
     resolveQualifiedName(qualifiedName) {
         let foundFormElement = null;
         this.visit(formElement => {
@@ -2594,21 +3069,18 @@ class Form extends Container {
         return foundFormElement;
     }
     exportSubmitMetaData() {
-        let submitMetaInstance = null;
         const captchaInfoObj = {};
-        function addCaptchaField(fieldName, fieldValue) {
-            if (captchaInfoObj[fieldName]) {
-                return;
-            }
-            captchaInfoObj[fieldName] = fieldValue;
-        }
         this.visit(field => {
             if (field.fieldType === 'captcha') {
-                addCaptchaField(field.qualifiedName, field.value);
+                captchaInfoObj[field.qualifiedName] = field.value;
             }
         });
-        submitMetaInstance = new SubmitMetaData(this.form.lang, captchaInfoObj);
-        return submitMetaInstance;
+        const options = {
+            lang: this.lang,
+            captchaInfo: captchaInfoObj,
+            additionalSubmitMetadata: { ...this.additionalSubmitMetadata }
+        };
+        return new SubmitMetaData(options);
     }
     #getNavigableChildren(children) {
         return children.filter(child => child.visible === true);
@@ -2723,7 +3195,7 @@ class Form extends Container {
         }, 'valid');
         field.subscribe((action) => {
             const field = action.target.getState();
-            if (field) {
+            if (action.payload.changes.length > 0 && field) {
                 const shallowClone = (obj) => {
                     if (obj && typeof obj === 'object') {
                         if (Array.isArray(obj)) {
@@ -2743,7 +3215,7 @@ class Form extends Container {
                     };
                 });
                 const fieldChangedAction = new FieldChanged(changes, field);
-                this.dispatch(fieldChangedAction);
+                this.notifyDependents(fieldChangedAction);
             }
         });
     }
@@ -2781,7 +3253,35 @@ class Form extends Container {
             const payload = action?.payload || {};
             const successEventName = payload?.success ? payload?.success : 'submitSuccess';
             const failureEventName = payload?.error ? payload?.error : 'submitError';
-            submit(context, successEventName, failureEventName, payload?.submit_as, payload?.data);
+            const formAction = payload.action || this.action;
+            const metadata = payload.metadata || {
+                'submitMetadata': this.exportSubmitMetaData()
+            };
+            const contentType = payload?.save_as || payload?.submit_as;
+            submit(context, successEventName, failureEventName, contentType, payload?.data, formAction, metadata);
+        }
+    }
+    save(action, context) {
+        const payload = action?.payload || {};
+        payload.save_as = 'multipart/form-data';
+        payload.metadata = {
+            'draftMetadata': {
+                'lang': this.lang,
+                'draftId': this.properties?.draftId || ''
+            }
+        };
+        payload.success = 'custom:saveSuccess';
+        payload.error = 'custom:saveError';
+        this.submit(action, context);
+        this.subscribe((action) => {
+            this._saveSuccess(action);
+        }, 'saveSuccess');
+    }
+    _saveSuccess(action) {
+        const draftId = action?.payload?.body?.draftId || '';
+        const properties = this.properties;
+        if (draftId && properties) {
+            properties.draftId = draftId;
         }
     }
     reset() {
@@ -2807,7 +3307,7 @@ class Form extends Container {
         return null;
     }
     get id() {
-        return '$form';
+        return this._jsonModel.id || '$form';
     }
     get title() {
         return this._jsonModel.title || '';
@@ -2915,7 +3415,7 @@ class Fieldset extends Container {
         return undefined;
     }
     get items() {
-        return super.items;
+        return super.items ? super.items : [];
     }
     get value() {
         return null;
@@ -2947,283 +3447,6 @@ __decorate([
 __decorate([
     dependencyTracked()
 ], InstanceManager.prototype, "minOccur", null);
-const dateRegex = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
-const emailRegex = /^[a-zA-Z0-9.!#$%&’*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$/;
-const days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-const daysInMonth = (leapYear, month) => {
-    if (leapYear && month == 2) {
-        return 29;
-    }
-    return days[month - 1];
-};
-const isLeapYear = (year) => {
-    return year % 400 === 0 || year % 4 === 0 && year % 100 !== 0;
-};
-const coerceType = (param, type) => {
-    let num;
-    switch (type) {
-        case 'string':
-            return param + '';
-        case 'number':
-            num = +param;
-            if (!isNaN(num)) {
-                return num;
-            }
-            break;
-        case 'boolean':
-            if (typeof param === 'string') {
-                return param === 'true';
-            }
-            else if (typeof param === 'number') {
-                return param !== 0;
-            }
-    }
-    throw `${param} has invalid type. Expected : ${type}, Actual ${typeof param}`;
-};
-const checkNumber = (inputVal) => {
-    if (inputVal === '' || inputVal == null) {
-        return {
-            value: '', valid: true
-        };
-    }
-    let value = parseFloat(inputVal);
-    const valid = !isNaN(value);
-    if (!valid) {
-        value = inputVal;
-    }
-    return {
-        value, valid
-    };
-};
-const checkInteger = (inputVal) => {
-    if (inputVal == '' || inputVal == null) {
-        return {
-            value: '', valid: true
-        };
-    }
-    let value = parseFloat(inputVal);
-    const valid = !isNaN(value) && Math.round(value) === value;
-    if (!valid) {
-        value = inputVal;
-    }
-    return {
-        value, valid
-    };
-};
-const toArray = (inputVal) => {
-    if (inputVal != null && !(inputVal instanceof Array)) {
-        return [inputVal];
-    }
-    return inputVal;
-};
-const checkBool = (inputVal) => {
-    const valid = typeof inputVal === 'boolean' || inputVal === 'true' || inputVal === 'false';
-    const value = typeof inputVal === 'boolean' ? inputVal : (valid ? inputVal === 'true' : inputVal);
-    return { valid, value };
-};
-const checkFile = (inputVal) => {
-    const value = extractFileInfo(inputVal);
-    const valid = value !== null;
-    return {
-        value: valid ? value : inputVal,
-        valid
-    };
-};
-const matchMediaType = (mediaType, accepts) => {
-    return !mediaType || accepts.some((accept) => {
-        const trimmedAccept = accept.trim();
-        const prefixAccept = trimmedAccept.split('/')[0];
-        const suffixAccept = trimmedAccept.split('.')[1];
-        return ((trimmedAccept.includes('*') && mediaType.startsWith(prefixAccept)) ||
-            (trimmedAccept.includes('.') && mediaType.endsWith(suffixAccept)) ||
-            (trimmedAccept === mediaType));
-    });
-};
-const partitionArray = (inputVal, validatorFn) => {
-    const value = toArray(inputVal);
-    if (value == null) {
-        return [[], [value]];
-    }
-    return value.reduce((acc, x) => {
-        if (acc[1].length == 0) {
-            const r = validatorFn(x);
-            const index = r.valid ? 0 : 1;
-            acc[index].push(r.value);
-        }
-        return acc;
-    }, [[], []]);
-};
-const ValidConstraints = {
-    date: ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'format'],
-    string: ['minLength', 'maxLength', 'pattern'],
-    number: ['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum'],
-    array: ['minItems', 'maxItems', 'uniqueItems'],
-    file: ['accept', 'maxFileSize'],
-    email: ['minLength', 'maxLength', 'format', 'pattern']
-};
-const Constraints = {
-    type: (constraint, inputVal) => {
-        let value = inputVal;
-        if (inputVal == undefined) {
-            return {
-                valid: true,
-                value: inputVal
-            };
-        }
-        let valid = true, res;
-        switch (constraint) {
-            case 'string':
-                valid = true;
-                value = inputVal.toString();
-                break;
-            case 'string[]':
-                value = toArray(inputVal);
-                break;
-            case 'number':
-                res = checkNumber(inputVal);
-                value = res.value;
-                valid = res.valid;
-                break;
-            case 'boolean':
-                res = checkBool(inputVal);
-                valid = res.valid;
-                value = res.value;
-                break;
-            case 'integer':
-                res = checkInteger(inputVal);
-                valid = res.valid;
-                value = res.value;
-                break;
-            case 'integer[]':
-                res = partitionArray(inputVal, checkInteger);
-                valid = res[1].length === 0;
-                value = valid ? res[0] : inputVal;
-                break;
-            case 'file':
-                res = checkFile(inputVal instanceof Array ? inputVal[0] : inputVal);
-                valid = res.valid;
-                value = res.value;
-                break;
-            case 'file[]':
-                res = partitionArray(inputVal, checkFile);
-                valid = res[1].length === 0;
-                value = valid ? res[0] : inputVal;
-                break;
-            case 'number[]':
-                res = partitionArray(inputVal, checkNumber);
-                valid = res[1].length === 0;
-                value = valid ? res[0] : inputVal;
-                break;
-            case 'boolean[]':
-                res = partitionArray(inputVal, checkBool);
-                valid = res[1].length === 0;
-                value = valid ? res[0] : inputVal;
-                break;
-        }
-        return {
-            valid,
-            value
-        };
-    },
-    format: (constraint, input) => {
-        let valid = true;
-        const value = input;
-        if (input === null) {
-            return { value, valid };
-        }
-        let res;
-        switch (constraint) {
-            case 'date':
-                res = dateRegex.exec((input || '').trim());
-                if (res != null) {
-                    const [match, year, month, date] = res;
-                    const [nMonth, nDate] = [+month, +date];
-                    const leapYear = isLeapYear(+year);
-                    valid = (nMonth >= 1 && nMonth <= 12) &&
-                        (nDate >= 1 && nDate <= daysInMonth(leapYear, nMonth));
-                }
-                else {
-                    valid = false;
-                }
-                break;
-            case 'email':
-                valid = new RegExp(emailRegex).test((input || '').trim());
-                break;
-            case 'data-url':
-                valid = true;
-                break;
-        }
-        return { valid, value };
-    },
-    minimum: (constraint, value) => {
-        return { valid: value >= constraint, value };
-    },
-    maximum: (constraint, value) => {
-        return { valid: value <= constraint, value };
-    },
-    exclusiveMinimum: (constraint, value) => {
-        return { valid: value > constraint, value };
-    },
-    exclusiveMaximum: (constraint, value) => {
-        return { valid: value < constraint, value };
-    },
-    minItems: (constraint, value) => {
-        return { valid: (value instanceof Array) && value.length >= constraint, value };
-    },
-    maxItems: (constraint, value) => {
-        return { valid: (value instanceof Array) && value.length <= constraint, value };
-    },
-    uniqueItems: (constraint, value) => {
-        return { valid: !constraint || ((value instanceof Array) && value.length === new Set(value).size), value };
-    },
-    minLength: (constraint, value) => {
-        return { ...Constraints.minimum(constraint, typeof value === 'string' ? value.length : 0), value };
-    },
-    maxLength: (constraint, value) => {
-        return { ...Constraints.maximum(constraint, typeof value === 'string' ? value.length : 0), value };
-    },
-    pattern: (constraint, value) => {
-        let regex;
-        if (typeof constraint === 'string') {
-            regex = new RegExp(constraint);
-        }
-        else {
-            regex = constraint;
-        }
-        return { valid: regex.test(value), value };
-    },
-    required: (constraint, value) => {
-        const valid = constraint ? value != null && value !== '' : true;
-        return { valid, value };
-    },
-    enum: (constraint, value) => {
-        return {
-            valid: constraint.indexOf(value) > -1,
-            value
-        };
-    },
-    accept: (constraint, value) => {
-        if (!constraint || constraint.length === 0 || value === null || value === undefined) {
-            return {
-                valid: true,
-                value
-            };
-        }
-        const tempValue = value instanceof Array ? value : [value];
-        const invalidFile = tempValue.some((file) => !matchMediaType(file.type, constraint));
-        return {
-            valid: !invalidFile,
-            value
-        };
-    },
-    maxFileSize: (constraint, value) => {
-        const sizeLimit = typeof constraint === 'string' ? getFileSizeInBytes(constraint) : constraint;
-        return {
-            valid: !(value instanceof FileObject) || value.size <= sizeLimit,
-            value
-        };
-    }
-};
 const validTypes = ['string', 'number', 'integer', 'boolean', 'file', 'string[]', 'number[]', 'integer[]', 'boolean[]', 'file[]', 'array', 'object'];
 class Field extends Scriptable {
     constructor(params, _options) {
@@ -3231,7 +3454,12 @@ class Field extends Scriptable {
         if (_options.mode !== 'restore') {
             this._applyDefaults();
             this.queueEvent(new Initialize());
-            this.queueEvent(new ExecuteRule());
+            if (this.form.changeEventBehaviour === 'deps') {
+                this.queueEvent(new Change({ changes: [] }));
+            }
+            else {
+                this.queueEvent(new ExecuteRule());
+            }
         }
     }
     _ruleNodeReference = [];
@@ -3381,6 +3609,9 @@ class Field extends Scriptable {
     get displayFormat() {
         return this.withCategory(this._jsonModel.displayFormat);
     }
+    get displayValueExpression() {
+        return this._jsonModel.displayValueExpression;
+    }
     get placeholder() {
         return this._jsonModel.placeholder;
     }
@@ -3411,7 +3642,8 @@ class Field extends Scriptable {
     }
     set valid(e) {
         const validity = {
-            valid: e
+            valid: e,
+            ...(e ? {} : { customConstraint: true })
         };
         this._setProperty('valid', e);
         this._setProperty('validity', validity);
@@ -3447,7 +3679,6 @@ class Field extends Scriptable {
     }
     set required(r) {
         this._setProperty('required', r);
-        this.validate();
     }
     get maximum() {
         if (this.type === 'number' || this.format === 'date' || this.type === 'integer') {
@@ -3499,6 +3730,9 @@ class Field extends Scriptable {
         }
     }
     get displayValue() {
+        if (this.displayValueExpression && typeof this.displayValueExpression === 'string' && this.displayValueExpression.length !== 0) {
+            return this.executeExpression(this.displayValueExpression);
+        }
         const df = this.displayFormat;
         if (df && this.isNotEmpty(this.value) && this.valid !== false) {
             try {
@@ -3577,6 +3811,9 @@ class Field extends Scriptable {
     }
     reset() {
         const changes = this.updateDataNodeAndTypedValue(this.default);
+        if (!changes) {
+            return;
+        }
         const validationStateChanges = {
             'valid': undefined,
             'errorMessage': '',
@@ -3847,12 +4084,15 @@ class Field extends Scriptable {
     }
     triggerValidationEvent(changes) {
         if (changes.validity) {
-            if (this.validity.valid) {
-                this.dispatch(new Valid());
-            }
-            else {
-                this.dispatch(new Invalid());
-            }
+            this.#triggerValidationEvent();
+        }
+    }
+    #triggerValidationEvent() {
+        if (this.validity.valid) {
+            this.dispatch(new Valid());
+        }
+        else {
+            this.dispatch(new Invalid());
         }
     }
     validate() {
@@ -3860,8 +4100,8 @@ class Field extends Scriptable {
             return [];
         }
         const changes = this.evaluateConstraints();
+        this.#triggerValidationEvent();
         if (changes.validity) {
-            this.triggerValidationEvent(changes);
             this.notifyDependents(new Change({ changes: Object.values(changes) }));
         }
         return this.valid ? [] : [new ValidationError(this.id, [this._jsonModel.errorMessage])];
@@ -3897,7 +4137,7 @@ class Field extends Scriptable {
             'validationMessage': message,
             'validity': {
                 valid: false,
-                ...(constraint != null ? { [constraintKeys[constraint]]: true } : {})
+                ...(constraint != null ? { [constraintKeys[constraint]]: true } : { customConstraint: true })
             }
         };
         const updates = this._applyUpdates(['valid', 'errorMessage', 'validationMessage', 'validity'], changes);
@@ -4074,6 +4314,17 @@ class Checkbox extends Field {
         baseConstraints.required = requiredConstraint(this.offValue());
         return baseConstraints;
     }
+    _applyDefaults() {
+        if (typeof this._jsonModel.checked === 'boolean') {
+            if (this._jsonModel.checked) {
+                this._jsonModel.default = this._jsonModel.enum?.[0];
+            }
+            else {
+                this._jsonModel.default = this._jsonModel.enum?.[1];
+            }
+        }
+        super._applyDefaults();
+    }
     _getDefaults() {
         return {
             ...super._getDefaults(),
@@ -4083,7 +4334,43 @@ class Checkbox extends Field {
     get enum() {
         return this._jsonModel.enum || [];
     }
+    updateDataNodeAndTypedValue(val) {
+        const changes = super.updateDataNodeAndTypedValue(val);
+        const valueChange = changes.find((c) => c.propertyName === 'value');
+        if (valueChange) {
+            const oldChecked = valueChange.prevValue === this._jsonModel.enum?.[0];
+            const newChecked = valueChange.currentValue === this._jsonModel.enum?.[0];
+            if (oldChecked !== newChecked) {
+                changes.push({
+                    propertyName: 'checked',
+                    prevValue: oldChecked,
+                    currentValue: newChecked
+                });
+            }
+        }
+        return changes;
+    }
+    set checked(check) {
+        if (check) {
+            this.value = this._jsonModel.enum?.[0];
+        }
+        else {
+            this.value = this._jsonModel.enum?.[1];
+        }
+    }
+    get checked() {
+        return this.value === this._jsonModel.enum?.[0];
+    }
+    getState(isRepeatableChild = false, forRestore = false) {
+        return {
+            ...super.getState(isRepeatableChild, forRestore),
+            checked: this.checked
+        };
+    }
 }
+__decorate([
+    dependencyTracked()
+], Checkbox.prototype, "checked", null);
 class CheckboxGroup extends Field {
     constructor(params, _options) {
         super(params, _options);
@@ -4152,6 +4439,19 @@ class Captcha extends Field {
         return undefined;
     }
 }
+class Button extends Field {
+    click() {
+        if (this._events?.click || !this._jsonModel.buttonType) {
+            return;
+        }
+        if (this._jsonModel.buttonType === 'submit') {
+            return this.form.dispatch(new Submit());
+        }
+        if (this._jsonModel.buttonType === 'reset') {
+            return this.form.dispatch(new Reset());
+        }
+    }
+}
 const alternateFieldTypeMapping = {
     'text': 'text-input',
     'number': 'number-input',
@@ -4194,7 +4494,7 @@ class FormFieldFactoryImpl {
             };
             retVal = new InstanceManager(newJson, options);
         }
-        else if ('items' in child) {
+        else if ('items' in child || child.fieldType === 'panel') {
             retVal = new Fieldset(child, options);
         }
         else {
@@ -4216,6 +4516,9 @@ class FormFieldFactoryImpl {
             else if (isCaptcha(child)) {
                 retVal = new Captcha(child, options);
             }
+            else if (isButton(child)) {
+                retVal = new Button(child, options);
+            }
             else {
                 retVal = new Field(child, options);
             }
@@ -4227,9 +4530,11 @@ const FormFieldFactory = new FormFieldFactoryImpl();
 const createFormInstance = (formModel, callback, logLevel = 'error', fModel = undefined) => {
     try {
         let f = fModel;
-        if (f == null) {
-            formModel = sitesModelToFormModel(formModel);
-            f = new Form({ ...formModel }, FormFieldFactory, new RuleEngine(), new EventQueue(new Logger(logLevel)), logLevel);
+        {
+            if (f == null) {
+                formModel = sitesModelToFormModel(formModel);
+                f = new Form({ ...formModel }, FormFieldFactory, new RuleEngine(), new EventQueue(new Logger(logLevel)), logLevel);
+            }
         }
         const formData = formModel?.data;
         if (formData) {
@@ -4246,6 +4551,7 @@ const createFormInstance = (formModel, callback, logLevel = 'error', fModel = un
         throw new Error(e);
     }
 };
+createFormInstance.currentVersion = currentVersion;
 const defaultOptions = {
     logLevel: 'error'
 };

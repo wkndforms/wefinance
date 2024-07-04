@@ -148,11 +148,11 @@ function fileElement(file, index) {
  * creates an HTML elements for drag & drop
  * @param {HTMLElement} wrapper
  */
-function createDragAndDropArea(wrapper) {
+function createDragAndDropArea(wrapper, field) {
   const input = wrapper.querySelector('input');
   const dragArea = `
     <div class="file-dragIcon"></div>
-    <div class="file-dragText">${dragDropText}</div>
+    <div class="file-dragText">${field?.properties?.dragDropText ?? dragDropText}</div>
     <button class="file-attachButton" type="button">${fileAttachmentText}</button>
   `;
   const dragContainer = document.createElement('div');
@@ -179,10 +179,11 @@ function createFileHandler(allFiles, input) {
 
     attachFiles: (inputEl, files) => {
       const multiple = inputEl.hasAttribute('multiple');
+      let newFiles = Array.from(files);
       if (!multiple) {
         allFiles.splice(0, allFiles.length);
+        newFiles = [newFiles[0]];
       }
-      const newFiles = Array.from(files);
       const currentLength = allFiles.length;
       allFiles.push(...newFiles);
       const newFileElements = newFiles
@@ -218,7 +219,7 @@ function createFileHandler(allFiles, input) {
 // eslint-disable-next-line no-unused-vars
 export default async function decorate(fieldDiv, field, htmlForm) {
   const allFiles = [];
-  const dragArea = createDragAndDropArea(fieldDiv);
+  const dragArea = createDragAndDropArea(fieldDiv, field);
   const input = fieldDiv.querySelector('input');
   fieldDiv.classList.add('decorated');
   const fileListElement = document.createElement('div');
@@ -254,10 +255,6 @@ export default async function decorate(fieldDiv, field, htmlForm) {
     } else if (e.target.tagName === 'SPAN') {
       fileHandler.previewFile(e.target?.parentElement?.dataset?.index || 0);
     }
-  });
-  htmlForm.addEventListener('reset', () => {
-    fileListElement.innerHTML = '';
-    input.value = '';
   });
   fieldDiv.insertBefore(fileListElement, input.nextElementSibling);
   // pre-fill file attachment

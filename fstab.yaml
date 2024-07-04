@@ -1,5 +1,5 @@
 mountpoints:
   /:
-    url: https://author-p76902-e226514-cmstg.adobeaemcloud.com/
+    url: https://author-p20852-e1378030.adobeaemcloud.com/bin/franklin.delivery/wkndforms/wefinance
     type: "markup"
-    suffix: ".md.html"
+    suffix: ".html"
